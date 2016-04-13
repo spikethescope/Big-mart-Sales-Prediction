@@ -1,0 +1,447 @@
+---
+title: "Bigmart_Analysis"
+output: html_document
+Last edit: 23/03/2016
+Version : 0.1
+
+---
+
+This document relates to the analysis of Bigmart data from the following link:
+
+http://datahack.analyticsvidhya.com/contest/practice-problem-bigmart-sales-prediction
+My approach is to reproduce the result from the following link for this data set.
+
+http://www.analyticsvidhya.com/blog/2016/02/bigmart-sales-solution-top-20/
+
+## Problem Statement (From the Website)
+--------------------------------
+The data scientists at BigMart have collected 2013 sales data for 1559 products across 10 stores in different cities. Also, certain attributes of each product and store have been defined. The aim is to build a predictive model and find out the sales of each product at a particular store.
+
+Using this model, BigMart will try to understand the properties of products and stores which play a key role in increasing sales.
+
+Please note that the data may have missing values as some stores might not report all the data due to technical glitches. Hence, it will be required to treat them accordingly.
+
+First Step is to develop hypotheses about the data. Here, Im trying to reproduce the approach given in the website. So, to start with, Im taking the same hypotheses summarised below:
+
+## Store Level Hypotheses:
+
+1. City type: 
+    + Stores located in urban or Tier 1 cities should have higher sales because of the higher income levels of people there.
+Population Density: Stores located in densely populated areas should have higher sales because of more demand.
+2. Store Capacity: 
+    + Stores which are very big in size should have higher sales as they act like one-stop-shops and people would prefer getting everything from one place
+
+3. Competitors: 
+    + Stores having similar establishments nearby should have less sales because of more competition.
+
+4. Marketing: 
+    + Stores which have a good marketing division should have higher sales as it will be able to attract customers through the right offers and advertising.
+5. Location: 
+    + Stores located within popular marketplaces should have higher sales because of better access to customers.
+6. Customer Behavior: 
+    + Stores keeping the right set of products to meet the local needs of customers will have higher sales.
+7. Ambiance: 
+    + Stores which are well-maintained and managed by polite and humble people are expected to have higher footfall and thus higher sales.
+##Product Level Hypotheses:
+
+1. Brand: 
+       + Branded products should have higher sales because of higher trust in the customer.
+2. Packaging: 
+       + Products with good packaging can attract customers and sell more.
+3. Utility: 
+       + Daily use products should have a higher tendency to sell as compared to the specific use products.
+4. Display Area: 
+       + Products which are given bigger shelves in the store are likely to catch attention first and sell more.
+5. Visibility in Store: 
+       + The location of product in a store will impact sales. Ones which are right at entrance will catch the eye of customer first rather than the ones in back.
+6. Advertising: 
+       + Better advertising of products in the store will should higher sales in most cases.
+7. Promotional Offers: 
+       + Products accompanied with attractive offers and discounts will sell more.
+       
+## Data Set
+
+We have train (8523) and test (5681) data set, train data set has both input and output variable(s). You need to predict the sales for test data set.
+
+Variable          | Description
+------------------|-------------------
+Item_Identifier   | Unique product ID
+Item_Weight       | Weight of product
+Item_Fat_Content  | Whether the product is low fat or not
+Item_Visibility   | The % of total display area of all products in a store allocated to the particular product
+Item_Type         | The category to which the product belongs
+Item_MRP          | Maximum Retail Price (list price) of the product
+Outlet_Identifier | Unique store ID
+Outlet_Establishment_Year | The year in which store was established
+Outlet_Size       | The size of the store in terms of ground area covered
+Outlet_Location_Type | The type of city in which the store is located
+Outlet_Type | Whether the outlet is just a grocery store or some sort of supermarket
+Item_Outlet_Sales | Sales of the product in the particulat store. This is the outcome variable to be predicted.
+
+(E:/Google Drive/Courseera materials/Reproducible Research/Variable Hypothesis link.png)
+
+Now load the data set:
+```{r, echo = FALSE,cache=TRUE}
+library(dplyr)
+library(ggplot2)
+library(Matrix)
+library(xgboost)
+
+
+setwd("E:\\Google Drive\\R Codes\\Hackathon\\BigMart Sales Prediction_Practice")
+
+train = read.csv("Train.csv", header = TRUE)
+test = read.csv("Test.csv", header = TRUE)
+
+```
+
+Combine both *train* and *test*
+
+```{r, echo=TRUE,cache=TRUE}
+data <- train[,1:11]
+data <- rbind(data, test)
+
+factor_1 <- rep("train", nrow(train))
+factor_1 <- append(factor_1, after= nrow(train), rep("test", nrow(test)))
+
+dsales <- NULL
+dsales <- append(dsales,train$Item_Outlet_Sales)
+dsales <- append(dsales, after = nrow(train), rep(0, nrow(test)))
+data$Item_Outlet_Sales <- dsales 
+data$datsource <- as.factor(factor_1)
+```
+
+Now calculate summary statistics for the data.
+```{r, echo = TRUE}
+
+
+apply(data[data$datsource == "train",c(2,4,6,12)], 2, summary)
+```
+
+Observations on train set contains Item_weight - 1463 NA's. The only numeric variable containing missing values.
+
+#frequency of item fat content
+```{r, echo = TRUE}
+table(data$Item_Fat_Content)
+```
+
+Low Fat count is more than Regular count
+low fat is coded in different names "LF", "low fat", "Low Fat"
+
+frequency of outlet_location_type
+```{r, echo = TRUE}
+table(data$Outlet_Location_Type)
+```
+
+
+#Imputation of Missing Values
+
+Item weight can be imputed with average of items in that product group. We use the
+item identifier for that item.
+
+```{r, echo=TRUE,cache=TRUE}
+dat_df <- tbl_df(data)
+dr_id <<- grepl("DR",data$Item_Identifier)
+nc_id <<- grepl("NC", data$Item_Identifier)
+fd_id <<- grepl("FD", data$Item_Identifier)
+
+#filter FD*
+fdw <- data$Item_Weight[fd_id]
+meanfdw <- mean(fdw, na.rm = T)
+meanfdw
+#REPLACE NA'S IN FD* WEIGHTS
+data$Item_Weight[fd_id & is.na(data$Item_Weight)] <- meanfdw
+
+#filter NC*
+ncw <- data$Item_Weight[nc_id]
+meanfcw <- mean(ncw, na.rm = T)
+meanfcw
+#replace na values
+data$Item_Weight[nc_id & is.na(data$Item_Weight)] <-meanfcw
+
+#filter NC*
+drw <- data$Item_Weight[dr_id]
+meandrw <- mean(drw, na.rm = T)
+#Replace NA values
+data$Item_Weight[dr_id & is.na(data$Item_Weight)] <-meandrw
+
+
+```
+
+#Impute Missing values for outlet size
+First calculate the mode for each factor.
+```{r,echo=TRUE,cache=TRUE}
+#FInd which is the maximum mode in each outlet type and ensure you don't select "" column 
+mn_os_ot <- dat_df %>% group_by(Outlet_Type) %>%  summarise(modsize = names(which.max(summary(Outlet_Size)[c(2,3,4)])))
+
+str(mn_os_ot)
+
+data$Outlet_Size[grepl("Grocery", data$Outlet_Type) & (data$Outlet_Size == "")] <- mn_os_ot$modsize[grepl("Grocery",mn_os_ot$Outlet_Type)]
+
+data$Outlet_Size[grepl("Supermarket Type1", data$Outlet_Type) & (data$Outlet_Size == "")] <- mn_os_ot$modsize[grepl("Supermarket Type1",mn_os_ot$Outlet_Type)]
+
+data$Outlet_Size[grepl("Supermarket Type2", data$Outlet_Type) & (data$Outlet_Size == "")] <- mn_os_ot$modsize[grepl("Supermarket Type2",mn_os_ot$Outlet_Type)]
+
+data$Outlet_Size[grepl("Supermarket Type3", data$Outlet_Type) & (data$Outlet_Size == "")] <- mn_os_ot$modsize[grepl("Supermarket Type3",mn_os_ot$Outlet_Type)]
+
+#Check for missing values
+table(data$Outlet_Size)
+```
+
+#Item visibility
+
+```{r,echo=TRUE,cache=TRUE}
+
+str(data$Item_Visibility)
+mn_vs_dr <- dat_df %>% filter(dr_id & Item_Visibility >0 ) %>% summarise(mean(Item_Visibility))
+
+mn_vs_nc <- dat_df %>% filter(nc_id & Item_Visibility >0 ) %>% summarise(mean(Item_Visibility))
+
+mn_vs_fd <- dat_df %>% filter(fd_id & Item_Visibility >0 ) %>% summarise(mean(Item_Visibility))
+
+data$Item_Visibility[dr_id & data$Item_Visibility ==0] <- as.numeric(mn_vs_dr)
+data$Item_Visibility[nc_id & data$Item_Visibility ==0] <- as.numeric(mn_vs_nc)
+
+data$Item_Visibility[fd_id & data$Item_Visibility ==0] <- as.numeric(mn_vs_fd)
+
+
+str(data)
+
+```
+
+#Create New Broad Category of items
+We seen that the item identifier can be grouped on 3 broad categories. So lets create 3 broad categories.
+
+```{r,echo=TRUE,cache=TRUE}
+#Create new groups 
+data$Item_Group[fd_id] <- "Food"
+data$Item_Group[nc_id] <- "Non-consumable"
+data$Item_Group[dr_id] <- "Drinks"
+data$Item_Group <- factor(data$Item_Group)
+
+```
+
+#Outlet age:
+Outlets establishment year is of not much use. Instead we could create an age variable out of this.
+
+
+```{r,echo=TRUE,cache=TRUE}
+
+data$Outlet_Years <- 2013 - data$Outlet_Establishment_Year
+
+
+```
+
+#Replace Patterns
+Next is to aggregate patterns. We saw "Low Fat" being represented as "LF" and "low fat". So lets replace them with the "Low Fat" and similarly "reg" with "Regular".
+
+```{r,echo=TRUE,cache=TRUE}
+#data[1:20,c("Item_Identifier","Item_Visibility","Item_Type","Outlet_Size","Item_Group","Outlet_Years")]
+
+data$Item_Fat_Content[grepl("LF",data$Item_Fat_Content)] <- "Low Fat"
+data$Item_Fat_Content[grepl("low fat",data$Item_Fat_Content)] <- "Low Fat"
+data$Item_Fat_Content[grepl("reg",data$Item_Fat_Content)] <- "Regular"
+#Adding a new factor level
+levels(data$Item_Fat_Content) <- c(levels(data$Item_Fat_Content),"Non-Edible")
+#Now add the factor to the data frame
+data$Item_Fat_Content[data$Item_Group == "Non-consumable"] <- "Non-Edible"
+
+data$Item_Fat_Content <- factor(data$Item_Fat_Content)
+
+#Copy this modified data for analysis in excel
+write.csv(data, "modified_trainntest.csv",col.names = T)
+
+```
+#Creating New Feature (OSize can be combined)
+In general, grocery store sales are low , type 1 & 2 medium, type 3 is high.
+```{r,echo=TRUE,cache=TRUE}
+data$Osize_Combined[data$Outlet_Type == "Grocery Store"] <- 0
+data$Osize_Combined[data$Outlet_Type == "Supermarket Type1"] <- 1
+data$Osize_Combined[data$Outlet_Type == "Supermarket Type2"] <- 1
+data$Osize_Combined[data$Outlet_Type == "Supermarket Type3"] <- 2
+
+data$Osize_Combined <- factor(data$Osize_Combined)
+data$Osize_Combined[1:10]
+```
+
+
+#Creating new feature (Loc_Size_Combined)
+
+Sales of Supermarket type 2 and 3 exist only in tier 3 cities. Grocery store located only in Tier 1 and 3 cities.
+1.Following observations can be had:
+      +Tier 1-Small-G store sales is LOW.
+      +Tier 1-Supermarket Type1-Medium&SMall OSize sales is HIGH
+      +Tier 2-SUpermarket Type1-Small OSize sales HIGH
+      +Tier 3-Gstore - SMall Osize Sales is LOW. 
+      +Tier 3-SMType1-High Osize sales is high.
+      +Tier 3-SM typ2 - Medium Osize sales is high.
+      +Tier 3-SM Typ3 - Medium Osize sales is high.
+
+```{r,echo=TRUE,cache=TRUE}
+data$Loc_Size_Combined[data$Outlet_Location_Type == "Tier 1" & data$Outlet_Size == "Small" & data$Outlet_Type == "Grocery Store"] <- as.numeric(0)
+data$Loc_Size_Combined[data$Outlet_Location_Type == "Tier 1" & data$Outlet_Size == "Small" & data$Outlet_Type == "Supermarket Type1"] <- as.numeric(1)
+data$Loc_Size_Combined[data$Outlet_Location_Type == "Tier 1" & data$Outlet_Size == "Medium" & data$Outlet_Type == "Supermarket Type1"] <- as.numeric(1)
+data$Loc_Size_Combined[data$Outlet_Location_Type == "Tier 2" & data$Outlet_Size == "Small" & data$Outlet_Type == "Supermarket Type1"] <- as.numeric(1)
+data$Loc_Size_Combined[data$Outlet_Location_Type == "Tier 3" & data$Outlet_Size == "Small" & data$Outlet_Type == "Grocery Store"] <- as.numeric(0)
+data$Loc_Size_Combined[data$Outlet_Location_Type == "Tier 3" & data$Outlet_Size == "High" & data$Outlet_Type == "Supermarket Type1"] <- as.numeric(1)
+data$Loc_Size_Combined[data$Outlet_Location_Type == "Tier 3" & data$Outlet_Size == "Medium" & data$Outlet_Type == "Supermarket Type2"] <- as.numeric(1)
+data$Loc_Size_Combined[data$Outlet_Location_Type == "Tier 3" & data$Outlet_Size == "Medium" & data$Outlet_Type == "Supermarket Type3"] <- as.numeric(1)
+#data$Loc_Size_Combined <- factor(data$Loc_Size_Combined)
+data$Loc_Size_Combined[1:20]
+```
+
+#Sample the modified data
+
+
+```{r,echo=TRUE,cache=TRUE}
+#data[1:20,c("Item_Identifier","Item_Type","Outlet_Size","Item_Group")]
+#cont <- data.frame(lapply(data[,c(3,7,9:11)], contrasts, contrasts = FALSE))
+vars <- c("Item_Fat_Content","Outlet_Location_Type","Outlet_Size","Outlet_Type","Item_Group","Osize_Combined")
+
+library(plyr)
+data$Outlet <- as.numeric(revalue(data$Outlet_Identifier, c("OUT010"="1", "OUT013"="2", "OUT017"="3", "OUT018"="4", "OUT019"="5", "OUT027"="6", "OUT035"="7", "OUT045"="8", "OUT046"="9", "OUT049" ="10")))
+
+
+ohe <- model.matrix(~ . + 0, data=data[vars], contrasts.arg = lapply(data[vars], contrasts, contrasts=FALSE))
+
+colnames(as.data.frame(ohe))
+data <- cbind(data,as.data.frame(ohe))
+#Creating a sparse matrix for the model
+#sparse_matrix <- sparse.model.matrix(Item_Outlet_Sales~.-1, data = data)
+
+#ohe_feats = c('Outlet_Type', 'Item_Fat_Content', 'Item_Type', #'Outlet_Identifier', 'Outlet_Size', 'Outlet_Location_Type')
+#dummies <- dummyVars(~.-1+ Outlet_Type + Item_Fat_Content + Item_Type + Outlet_Identifier + Outlet_Size + Outlet_Location_Type, data = data)
+
+#df_all_ohe <- as.data.frame(predict(dummies, newdata = data))
+
+#df_all_combined <- cbind(df_all[,-c(which(colnames(df_all) %in% ohe_feats))],df_all_ohe)
+str(data)
+colnames(data)
+
+```
+
+#Filter train data
+```{r,echo=TRUE,cache=TRUE}
+
+vars_trn <- c("Item_Weight","Item_Visibility","Item_MRP","Outlet_Years","Outlet_TypeGrocery Store","Outlet_TypeSupermarket Type1",
+"Outlet_TypeSupermarket Type2","Outlet_TypeSupermarket Type3", "Item_Fat_ContentLow Fat","Item_Fat_ContentRegular","Item_Fat_ContentNon-Edible","Outlet_SizeHigh","Outlet_SizeMedium",
+"Outlet_SizeSmall","Outlet_Location_TypeTier 1","Outlet_Location_TypeTier 2","Outlet_Location_TypeTier 3","Item_GroupDrinks","Item_GroupFood", 
+"Item_GroupNon-consumable","Outlet","Osize_Combined0","Osize_Combined1","Osize_Combined2","Loc_Size_Combined")
+vars_tst <- c(vars_trn,"Item_Identifier","Outlet_Identifier")
+data[1:10,vars_trn]
+```
+
+
+```{r,echo=TRUE,cache=TRUE}
+dat_train <- data[data$datsource == "train",vars_trn]
+dat_test <- data[data$datsource == "test",vars_tst]
+output_train <- data[data$datsource == "train","Item_Outlet_Sales"]
+
+dat_train$Item_Visibility <- as.numeric(unlist(dat_train$Item_Visibility))
+dat_train$Loc_Size_Combined <- as.numeric(levels(dat_train$Loc_Size_Combined ))[dat_train$Loc_Size_Combined]
+dat_test$Loc_Size_Combined <- as.numeric(levels(dat_test$Loc_Size_Combined ))[dat_test$Loc_Size_Combined]
+str(dat_train)
+str(dat_test)
+#data[data$datsource == "train" & data$Item_Group == "Drinks",]
+str(output_train)
+```
+
+
+#Baseline Model
+```{r,echo=TRUE,cache=TRUE}
+
+if(TRUE){
+  
+  library(MASS)
+  fit <- lm(output_train ~ `Item_Visibility`+`Item_Weight` + `Item_Visibility` + `Item_MRP`+`Outlet_Years` + `Outlet_TypeGrocery Store` + `Outlet_TypeSupermarket Type1` + `Outlet_TypeSupermarket Type2` + `Outlet_TypeSupermarket Type3` + `Item_Fat_ContentLow Fat`+ `Item_Fat_ContentRegular` + `Outlet_SizeHigh` + `Outlet_SizeMedium` + `Outlet_SizeSmall` + `Outlet_Location_TypeTier 1` + `Outlet_Location_TypeTier 2` + `Outlet_Location_TypeTier 3` + `Item_GroupDrinks` + `Item_GroupDrinks` + `Item_GroupFood` + `Item_GroupNon-consumable` + `Outlet` + `Osize_Combined0`+ `Osize_Combined1`+`Osize_Combined2`+ `Loc_Size_Combined`, 
+            data=dat_train)
+  
+step <- stepAIC(fit, direction="both")
+step$anova # display results
+#Revised based on step regression results
+
+
+
+#y_pred <- predict(fit, dat_test)
+y_pred <- predict(step, dat_test)
+
+
+}
+
+if(FALSE){
+  
+  #Now filtering training set based on regression result
+  vars_fltr_trn <- c("Item_MRP","Outlet_Years","Outlet_TypeGrocery Store","Outlet_TypeSupermarket Type1",
+"Outlet_TypeSupermarket Type3","Outlet_Years")
+  vars_fltr_tst <- c(vars_trn,"Item_Identifier","Outlet_Identifier")
+  
+  dat_fltr_train <- dat_train[,vars_fltr_trn]
+  dat_fltr_test <- dat_test[,vars_fltr_tst]
+  
+  set.seed(1234)
+  
+  
+  xgb <- xgboost(data = data.matrix(dat_fltr_train), 
+   label = data.matrix(output_train), 
+   booster = "gbtree",
+   eta = 0.3,
+   max_depth = 15, 
+   nround=200, 
+   seed = 123,
+   eval_metric = "rmse",
+   objective = "reg:linear",
+   #num_class = 12,
+   nthread = 3
+  )
+  
+  
+  dat_xgb <- dat_fltr_test[,-c(grep("Item_Identifier",colnames(dat_test)),grep("Outlet_Identifier",colnames(dat_test)) )]
+  
+  head(dat_xgb)
+  write.csv(dat_xgb,"xgb_test.csv",col.names = TRUE)
+  
+  y_pred <- predict(xgb, data.matrix(dat_xgb))
+  
+  head(y_pred)
+  writedata <- data.frame(Item_Identifier=dat_test$Item_Identifier,Outlet_Identifier =   dat_test$Outlet_Identifier, Item_Outlet_Sales = y_pred)
+  str(writedata)
+}
+
+if(TRUE){
+  
+    library(randomForest)
+    require(graphics)
+    # Fitting model
+    fit <- randomForest(y=data.matrix(output_train), x=data.matrix(dat_train)                        ,ntree=100)
+    summary(fit)
+    y_pred2 = predict(fit,dat_test)
+    
+}
+
+if(TRUE)
+{
+  library(e1071)
+  #Support vector machines
+  #svm_fit<-svm(y=data.matrix(output_train), x=data.matrix(dat_train))
+  svm_fit<-svm(output_train~.,data= dat_train)
+  
+  y_pred3 <- predict(svm_fit,newdata=dat_test)
+  print(y_pred3[1:10])
+}
+
+#importance(fit)
+#Use the following for a simple ensemble
+y_pred <- (y_pred + y_pred2 + y_pred3 )/3
+#writedata$Item_Outlet_Sales <- y_pred
+writedata <- cbind(as.character(dat_test[,"Item_Identifier"]),as.character(dat_test[,"Outlet_Identifier"]),y_pred)
+colnames(writedata) = c("Item_Identifier","Outlet_Identifier","Item_Outlet_Sales")
+#writedata[1:10,]
+#writedata[1:10,]
+write.csv(writedata,"solution_ln.csv",row.names = FALSE)
+
+
+```
+
+
+
+
